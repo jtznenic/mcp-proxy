@@ -4,11 +4,16 @@
 
 import asyncio
 import os
+import shlex
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
 import mcp.types as types
 from mcp import ClientSession
+from mcp.client.sse import sse_client
+from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.client.streamable_http import streamablehttp_client
 from mcp.server import NotificationOptions, Server
 from mcp.server.models import InitializationOptions
@@ -35,6 +40,21 @@ def split_names(value: str | None) -> set[str]:
     return {item.strip() for item in value.split(",") if item.strip()}
 
 
+def split_args(value: str | None) -> list[str]:
+    if not value:
+        return []
+    return shlex.split(value, posix=False)
+
+
+def same_path(left: str, right: str) -> bool:
+    return Path(left.strip('"\'')).expanduser().resolve() == Path(right.strip('"\'')).expanduser().resolve()
+
+
+def stdio_points_to_current_proxy(command: str, args: list[str]) -> bool:
+    current_script = str(Path(__file__).resolve())
+    return any(same_path(token, current_script) for token in [command, *args])
+
+
 class Config:
     def __init__(self) -> None:
         env_file = os.environ.get("ENV_FILE")
@@ -49,13 +69,26 @@ class Config:
             for key, value in values.items()
             if key.startswith("UPSTREAM_HEADER_")
         }
+        self.upstream_command = values.get("UPSTREAM_COMMAND", "")
+        self.upstream_args = split_args(values.get("UPSTREAM_ARGS"))
+        self.upstream_env = {
+            key.removeprefix("UPSTREAM_ENV_"): value
+            for key, value in values.items()
+            if key.startswith("UPSTREAM_ENV_")
+        }
         self.allow_tools = split_names(values.get("ALLOW_TOOLS"))
         self.deny_tools = split_names(values.get("DENY_TOOLS"))
 
-        if self.upstream_type != "http":
-            raise RuntimeError("Only UPSTREAM_TYPE=http is supported")
-        if not self.upstream_url:
+        if self.upstream_type not in {"http", "sse", "stdio"}:
+            raise RuntimeError("UPSTREAM_TYPE must be one of: http, sse, stdio")
+        if self.upstream_type in {"http", "sse"} and not self.upstream_url:
             raise RuntimeError("UPSTREAM_URL is required")
+        if self.upstream_type == "stdio" and not self.upstream_command:
+            raise RuntimeError("UPSTREAM_COMMAND is required")
+        if self.upstream_type == "stdio" and stdio_points_to_current_proxy(
+            self.upstream_command, self.upstream_args
+        ):
+            raise RuntimeError("stdio upstream cannot point back to this proxy script")
 
     def tool_allowed(self, name: str) -> bool:
         if self.allow_tools:
@@ -66,12 +99,34 @@ class Config:
 config = Config()
 
 
+@asynccontextmanager
+async def upstream_session() -> AsyncIterator[ClientSession]:
+    if config.upstream_type == "http":
+        async with streamablehttp_client(config.upstream_url, headers=config.headers) as streams:
+            read_stream, write_stream, _ = streams
+            async with ClientSession(read_stream, write_stream) as session:
+                yield session
+    elif config.upstream_type == "sse":
+        async with sse_client(config.upstream_url, headers=config.headers) as streams:
+            read_stream, write_stream = streams
+            async with ClientSession(read_stream, write_stream) as session:
+                yield session
+    else:
+        server_params = StdioServerParameters(
+            command=config.upstream_command,
+            args=config.upstream_args,
+            env=config.upstream_env or None,
+        )
+        async with stdio_client(server_params) as streams:
+            read_stream, write_stream = streams
+            async with ClientSession(read_stream, write_stream) as session:
+                yield session
+
+
 async def with_upstream(action: Any) -> Any:
-    async with streamablehttp_client(config.upstream_url, headers=config.headers) as streams:
-        read_stream, write_stream, _ = streams
-        async with ClientSession(read_stream, write_stream) as session:
-            await session.initialize()
-            return await action(session)
+    async with upstream_session() as session:
+        await session.initialize()
+        return await action(session)
 
 
 @server.list_tools()

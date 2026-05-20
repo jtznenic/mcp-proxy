@@ -47,13 +47,37 @@ ALLOW_TOOLS=google_search
 # DENY_TOOLS=google_search_images,google_search_videos,webpage_scrape
 ```
 
+For SSE upstream servers, use the same URL/header options with `UPSTREAM_TYPE=sse`:
+
+```env
+UPSTREAM_TYPE=sse
+UPSTREAM_URL=https://mcp.example.com/sse
+UPSTREAM_HEADER_Authorization=Bearer <your-token>
+ALLOW_TOOLS=google_search
+```
+
+For stdio upstream servers, provide the command, optional arguments, and optional environment variables:
+
+```env
+UPSTREAM_TYPE=stdio
+UPSTREAM_COMMAND=npx
+UPSTREAM_ARGS=-y @example/mcp-server
+UPSTREAM_ENV_API_KEY=<your-token>
+ALLOW_TOOLS=google_search
+```
+
+A stdio upstream must not point back to this proxy script, because that would recursively start more proxy processes.
+
 ### Config options
 
 | Option | Required | Description |
 | --- | --- | --- |
-| `UPSTREAM_TYPE` | No | Currently only `http` is supported. Defaults to `http` |
-| `UPSTREAM_URL` | Yes | Upstream MCP server URL |
-| `UPSTREAM_HEADER_*` | No | HTTP headers forwarded to the upstream MCP server |
+| `UPSTREAM_TYPE` | No | Upstream transport: `http`, `sse`, or `stdio`. Defaults to `http` |
+| `UPSTREAM_URL` | For `http` / `sse` | Upstream MCP server URL |
+| `UPSTREAM_HEADER_*` | No | HTTP headers forwarded to `http` and `sse` upstream MCP servers |
+| `UPSTREAM_COMMAND` | For `stdio` | Command used to start the upstream stdio MCP server |
+| `UPSTREAM_ARGS` | No | Arguments for `UPSTREAM_COMMAND`, split using shell-like quoting rules |
+| `UPSTREAM_ENV_*` | No | Environment variables passed to the upstream stdio MCP server |
 | `ALLOW_TOOLS` | No | Comma-separated tool allowlist |
 | `DENY_TOOLS` | No | Comma-separated tool denylist |
 
@@ -105,7 +129,7 @@ On Windows, forward slashes can be used to avoid JSON backslash escaping issues:
 
 ## How it works
 
-The proxy communicates with the agent over stdio and connects to the upstream MCP server over HTTP:
+The proxy communicates with the agent over stdio and connects to the upstream MCP server over HTTP, SSE, or stdio:
 
 1. The agent requests the tool list
 2. The proxy fetches the full tool list from the upstream MCP server
@@ -139,8 +163,7 @@ This is expected. In normal use, `ENV_FILE` is passed by the agent MCP configura
 
 ## Current limitations
 
-- Only `UPSTREAM_TYPE=http` is supported
-- stdio upstream MCP servers are not supported
+- Supported upstream transports are `http`, `sse`, and `stdio`
 - A new upstream session is created for each tool-list or tool-call request; this keeps the implementation simple but is not optimized for high throughput
 
 ## Example: expose only Serper search
