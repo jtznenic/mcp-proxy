@@ -1,0 +1,12 @@
+# Local MCP secrets and per-service configs
+*.env
+
+# Claude local workspace settings
+.claude
+
+# Python cache files
+__pycache__/
+*.py[cod]
+
+# Local virtual environments
+.venv/
